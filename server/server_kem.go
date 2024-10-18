@@ -1,13 +1,16 @@
-// Key encapsulation TCP server Go example with hybrid ECDH + Kyber KEM
 package main
 
 import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	// "crypto/x509"
+	// "encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	// "io/ioutil"
 	"log"
 	"math/big"
 	"net"
@@ -67,19 +70,46 @@ func DeriveSharedSecret(privKey []byte, pubX, pubY *big.Int) ([]byte, error) {
 	return hash[:], nil
 }
 
+// LoadServerTLSConfig loads the TLS certificates and returns the TLS config for the server
+func LoadServerTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	// Load server certificate and key
+	serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load server certificate: %v", err)
+	}
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		ClientAuth:				tls.RequireAnyClientCert,
+		ClientCAs:				nil,
+		Certificates:			[]tls.Certificate{serverCert},
+	}
+
+	return tlsConfig, nil
+}
+
 func main() {
-	if len(os.Args) == 1 {
-		fmt.Println("Usage: server_kem <port number> [KEM name (optional)]")
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: server_kem <port number> <server_cert> <server_key> [KEM name (optional)]")
 		os.Exit(1)
 	}
 	port := os.Args[1]
+	serverCert := os.Args[2]
+	serverKey := os.Args[3]
+	// clientCert := os.Args[4]
 	kemName := "Kyber512"
-	if len(os.Args) > 2 {
-		kemName = os.Args[2]
+	if len(os.Args) == 4 {
+		kemName = os.Args[4]
 	}
 
 	log.SetOutput(os.Stdout) // log to stdout instead of the default stderr
-	fmt.Println("Launching hybrid (ECDH +", kemName, ") server on port", port)
+	fmt.Println("Launching hybrid (ECDH +", kemName, ") server with mTLS on port", port)
+
+	// Load TLS configuration
+	tlsConfig, err := LoadServerTLSConfig(serverCert, serverKey)
+	if err != nil {
+		log.Fatalf("Failed to load TLS config: %v", err)
+	}
 
 	// Pre-initialize Kyber KEM for logging details
 	kem := oqs.KeyEncapsulation{}
@@ -89,17 +119,23 @@ func main() {
 	fmt.Printf("%v\n\n", kem.Details())
 	kem.Clean()
 
-	ln, err := net.Listen("tcp", ":"+port)
+	// Create a TLS listener using the TLS configuration
+	ln, err := tls.Listen("tcp", ":"+port, tlsConfig)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to start TLS listener: %v", err)
 	}
+	defer ln.Close()
+
+	fmt.Printf("Server is listening on port %s with mutual TLS\n", port)
 
 	// Listen indefinitely (until explicitly stopped, e.g., with CTRL+C in UNIX)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("Failed to accept connection: %v", err)
 		}
+		log.Println("Client connected")
+
 		// Handle connections concurrently
 		go handleConnection(conn, kemName)
 	}
@@ -113,6 +149,7 @@ func handleConnection(conn net.Conn, kemName string) {
 	if err != nil {
 		log.Fatal(errors.New("server cannot send the KEM name to the client"))
 	}
+	log.Println("Sent KEM name to client:", kemName)
 
 	// === Classical ECDH Part ===
 	serverPrivKeyECDH, serverPubXECDH, serverPubYECDH, err := GenerateECDHKeyPair()
@@ -166,73 +203,55 @@ func handleConnection(conn net.Conn, kemName string) {
 
 	// Then send ciphertext to client and close the connection
 	n, err = conn.Write(ciphertext)
-	if err != nil {
-		log.Fatal(err)
-	} else if n != server.Details().LengthCiphertext {
-		log.Fatal(errors.New("server expected to write " + fmt.Sprintf("%v", server.
-			Details().LengthCiphertext) + " bytes, but instead wrote " + fmt.Sprintf("%v", n)))
+	if err != nil || n != len(ciphertext) {
+		log.Fatal("Server failed to send KEM ciphertext to client:", err)
 	}
 
 	fmt.Printf("Server Kyber shared secret: %x\n", sharedSecretKyber)
 
-	// === Combine ECDH and Kyber Shared Secrets (Hybrid) ===
-	combinedSharedSecret := sha256.Sum256(append(sharedSecretECDH, sharedSecretKyber...))
+	// === Hybrid Secret Key Establishment (ECDH + Kyber KEM) ===
+	// Concatenate both shared secrets
+	hybridSecret := append(sharedSecretECDH, sharedSecretKyber...)
+	hash := sha256.Sum256(hybridSecret) // hash to create final hybrid key
+	finalKey := hash[:]
 
-	log.Printf("\nConnection #%d - server hybrid shared secret:\n% X ... % X\n\n",
-		counter.Val(), combinedSharedSecret[0:8],
-		combinedSharedSecret[len(combinedSharedSecret)-8:])
-
-	// Use combined key to decrypt incoming messages
-    aesKey := combinedSharedSecret[:32] // Use first 32 bytes for AES-256
-
-	// Read the incoming ciphertext
-    codedtext := make([]byte, 1024) // Example size
-    n2, err := conn.Read(codedtext)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    block, err := aes.NewCipher(aesKey)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    gcm, err := cipher.NewGCM(block)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    nonceSize := gcm.NonceSize()
-    nonce, codedtext := codedtext[:nonceSize], codedtext[nonceSize:n2]
-    
-    plaintext, err := gcm.Open(nil, nonce, codedtext, nil)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    fmt.Printf("Decrypted message from client: %s\n", plaintext)
-
-	// Encrypt a response to send to the client
-	block, err = aes.NewCipher(aesKey)
+	// Encrypt data using AES with the final hybrid key
+	plaintext := "This is the secret message using hybrid mTLS!"
+	ciphertext, err = EncryptAES(finalKey, plaintext)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Encryption failed:", err)
 	}
-	
-	// Using GCM for authenticated encryption
-	gcm, err = cipher.NewGCM(block)
-	if err != nil {
-		log.Fatal(err)
-	}
-	nonce = make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		log.Fatal(err)
-	}
-	plaintext = []byte("Ola do servidor BR!")
-	codedtext = gcm.Seal(nonce, nonce, plaintext, nil)
 
-	// Send encrypted message to server
-	conn.Write(codedtext)
+	// Send the encrypted message to the client
+	n, err = conn.Write(ciphertext)
+	if err != nil || n != len(ciphertext) {
+		log.Fatal("Server failed to send encrypted message to client:", err)
+	}
+	fmt.Println("Sent encrypted message:", ciphertext)
 
-	// Increment the connection number
+	// Increment connection counter
 	counter.Add()
+	fmt.Printf("Total connections served: %d\n", counter.Val())
+}
+
+// EncryptAES encrypts the given plaintext using AES with the provided key
+func EncryptAES(key []byte, plaintext string) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use AES in GCM mode (Authenticated Encryption)
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+
+	ciphertext := aesGCM.Seal(nonce, nonce, []byte(plaintext), nil)
+	return ciphertext, nil
 }
