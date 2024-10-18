@@ -98,7 +98,7 @@ func main() {
 	serverKey := os.Args[3]
 	// clientCert := os.Args[4]
 	kemName := "Kyber512"
-	if len(os.Args) == 4 {
+	if len(os.Args) == 5 {
 		kemName = os.Args[4]
 	}
 
@@ -135,6 +135,31 @@ func main() {
 			log.Fatalf("Failed to accept connection: %v", err)
 		}
 		log.Println("Client connected")
+
+		// Assert the connection to be of type *tls.Conn
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			log.Println("Failed to assert connection as TLS")
+			conn.Close()
+			continue
+		}
+
+		// Perform TLS handshake
+		err = tlsConn.Handshake()
+		if err != nil {
+			log.Printf("TLS handshake failed: %v", err)
+			conn.Close()
+			continue
+		}
+
+		// Retrieve the client's certificate
+		state := tlsConn.ConnectionState()
+		if len(state.PeerCertificates) > 0 {
+			clientCert := state.PeerCertificates[0]
+			log.Printf("Client Certificate CN: %s\n", clientCert.Subject.CommonName)
+		} else {
+			log.Println("No client certificate provided")
+		}
 
 		// Handle connections concurrently
 		go handleConnection(conn, kemName)
@@ -221,6 +246,7 @@ func handleConnection(conn net.Conn, kemName string) {
 	if err != nil {
 		log.Fatal("Encryption failed:", err)
 	}
+	fmt.Printf("Message to be sent: %x\n", ciphertext)
 
 	// Send the encrypted message to the client
 	n, err = conn.Write(ciphertext)
@@ -231,7 +257,7 @@ func handleConnection(conn net.Conn, kemName string) {
 
 	// Increment connection counter
 	counter.Add()
-	fmt.Printf("Total connections served: %d\n", counter.Val())
+	fmt.Printf("Total connections served: %d\n\n", counter.Val())
 }
 
 // EncryptAES encrypts the given plaintext using AES with the provided key
