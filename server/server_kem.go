@@ -5,12 +5,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	// "crypto/x509"
-	// "encoding/pem"
 	"errors"
 	"fmt"
 	"io"
-	// "io/ioutil"
 	"log"
 	"math/big"
 	"net"
@@ -18,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/open-quantum-safe/liboqs-go/oqs"
-
 	"crypto/aes"
     "crypto/cipher"
 )
@@ -126,7 +122,7 @@ func main() {
 	}
 	defer ln.Close()
 
-	fmt.Printf("Server is listening on port %s with mutual TLS\n", port)
+	fmt.Printf("Server is listening on port %s with mutual TLS\n\n", port)
 
 	// Listen indefinitely (until explicitly stopped, e.g., with CTRL+C in UNIX)
 	for {
@@ -156,7 +152,7 @@ func main() {
 		state := tlsConn.ConnectionState()
 		if len(state.PeerCertificates) > 0 {
 			clientCert := state.PeerCertificates[0]
-			log.Printf("Client Certificate CN: %s\n", clientCert.Subject.CommonName)
+			log.Printf("Client Certificate CN: %s\n\n", clientCert.Subject.CommonName)
 		} else {
 			log.Println("No client certificate provided")
 		}
@@ -246,14 +242,15 @@ func handleConnection(conn net.Conn, kemName string) {
 	if err != nil {
 		log.Fatal("Encryption failed:", err)
 	}
-	fmt.Printf("Message to be sent: %x\n", ciphertext)
+	fmt.Printf("\nMessage to be sent: %s\n", plaintext)
+	fmt.Printf("Encrypted message to be sent: %x\n", ciphertext)
 
 	// Send the encrypted message to the client
 	n, err = conn.Write(ciphertext)
 	if err != nil || n != len(ciphertext) {
 		log.Fatal("Server failed to send encrypted message to client:", err)
 	}
-	fmt.Println("Sent encrypted message:", ciphertext)
+	fmt.Println("Encrypted message sent!")
 
 	// Increment connection counter
 	counter.Add()

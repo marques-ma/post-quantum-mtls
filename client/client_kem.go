@@ -11,18 +11,14 @@ import (
 	"io"
 	"log"
 	"math/big"
-	// "net"
 	"os"
 
-
 	"github.com/open-quantum-safe/liboqs-go/oqs"
-
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/ecdsa"
-	// "io/ioutil"
 
 )
 
@@ -211,20 +207,21 @@ func main() {
 
 	// === Receive Encrypted Response from Server ===
 	// Receive the server's encrypted message
-	codedtext = make([]byte, 1024) // Example size
-	n2, err := tlsConn.Read(codedtext)
+	fullMessage, err := io.ReadAll(tlsConn)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Printf("\nMessage received: %x\n", fullMessage)
 
 	// Decrypt server's message using the hybrid shared secret (AES)
 	nonceSize := gcm.NonceSize()
-	if n2 < nonceSize {
+	if len(fullMessage) < nonceSize {
 		log.Fatal("Received message too short")
 	}
-	nonce, codedtext = codedtext[:nonceSize], codedtext[nonceSize:n2]
+	nonce, ciphertext = fullMessage[:nonceSize], fullMessage[nonceSize:]
 
-	plaintext, err = gcm.Open(nil, nonce, codedtext, nil)
+
+	plaintext, err = gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		log.Fatal("Decryption failed:", err)
 	}
